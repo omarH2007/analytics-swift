@@ -198,18 +198,16 @@ extension SegmentDestination {
                         cleanupUploads()
                     }
                     
-                    // we have a legit upload in progress now, so add it to our list.
                     if let upload = uploadTask {
                         add(uploadTask: UploadTaskInfo(url: url, data: nil, task: upload))
-                    } else {
-                        // we couldn't get a task, so we need to leave the group or things will hang.
+                    } else if analytics?.configuration.values.customTrackUrl == nil {
                         group.leave()
                     }
                 }
             }
         }
     }
-    
+
     private func flushData(group: DispatchGroup) {
         // DO NOT CALL THIS FROM THE MAIN THREAD, IT BLOCKS!
         // Don't make me add a check here; i'll be sad you didn't follow directions.
@@ -269,15 +267,13 @@ extension SegmentDestination {
                 cleanupUploads()
             }
             
-            // we have a legit upload in progress now, so add it to our list.
             if let upload = uploadTask {
                 add(uploadTask: UploadTaskInfo(url: nil, data: data, task: upload))
-            } else {
-                // we couldn't get a task, so we need to leave the group or things will hang.
+            } else if analytics?.configuration.values.customTrackUrl == nil {
                 group.leave()
                 semaphore.signal()
             }
-            
+
             _ = semaphore.wait(timeout: .distantFuture)
         }
     }

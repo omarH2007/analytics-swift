@@ -25,6 +25,7 @@ public protocol RawEvent: Codable {
     var messageId: String? { get set }
     var userId: String? { get set }
     var timestamp: String? { get set }
+    var writeKey: String? { get set }
     
     var context: JSON? { get set }
     var integrations: JSON? { get set }
@@ -39,6 +40,7 @@ public struct TrackEvent: RawEvent {
     public var messageId: String? = nil
     public var userId: String? = nil
     public var timestamp: String? = nil
+    public var writeKey: String? = nil
     public var context: JSON? = nil
     public var integrations: JSON? = nil
     public var metrics: [JSON]? = nil
@@ -65,6 +67,7 @@ public struct IdentifyEvent: RawEvent {
     public var messageId: String? = nil
     public var userId: String?
     public var timestamp: String? = nil
+    public var writeKey: String? = nil
     public var context: JSON? = nil
     public var integrations: JSON? = nil
     public var metrics: [JSON]? = nil
@@ -91,6 +94,7 @@ public struct ScreenEvent: RawEvent {
     public var messageId: String? = nil
     public var userId: String? = nil
     public var timestamp: String? = nil
+    public var writeKey: String? = nil
     public var context: JSON? = nil
     public var integrations: JSON? = nil
     public var metrics: [JSON]? = nil
@@ -119,6 +123,7 @@ public struct GroupEvent: RawEvent {
     public var messageId: String? = nil
     public var userId: String? = nil
     public var timestamp: String? = nil
+    public var writeKey: String? = nil
     public var context: JSON? = nil
     public var integrations: JSON? = nil
     public var metrics: [JSON]? = nil
@@ -144,6 +149,7 @@ public struct AliasEvent: RawEvent {
     public var anonymousId: String? = nil
     public var messageId: String? = nil
     public var timestamp: String? = nil
+    public var writeKey: String? = nil
     public var context: JSON? = nil
     public var integrations: JSON? = nil
     public var metrics: [JSON]? = nil
@@ -289,6 +295,7 @@ extension RawEvent {
             messageId = e.messageId
             userId = e.userId
             timestamp = e.timestamp
+            writeKey = e.writeKey
             context = e.context
             integrations = e.integrations
             _metadata = e._metadata
@@ -307,6 +314,10 @@ extension RawEvent {
         result.timestamp = Date().iso8601()
         result.integrations = try? JSON([String: Any]())
         result._metadata = DestinationMetadata()
+        
+        if let system: System = store.currentState() {
+            result.writeKey = system.configuration.values.writeKey
+        }
         
         return result
     }

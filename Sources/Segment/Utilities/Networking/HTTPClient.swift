@@ -25,8 +25,9 @@ public class HTTPClient {
     private var apiHost: String
     private var apiKey: String
     private var cdnHost: String
+    internal var customTrackUrl: URL?
 
-    private weak var analytics: Analytics?
+    internal weak var analytics: Analytics?
 
     init(analytics: Analytics) {
         self.analytics = analytics
@@ -34,7 +35,7 @@ public class HTTPClient {
         self.apiKey = analytics.configuration.values.writeKey
         self.apiHost = analytics.configuration.values.apiHost
         self.cdnHost = analytics.configuration.values.cdnHost
-        
+        self.customTrackUrl = analytics.configuration.values.customTrackUrl
         self.session = analytics.configuration.values.httpSession()
     }
 
@@ -53,8 +54,12 @@ public class HTTPClient {
     ///   - completion: The closure executed when done. Passes if the task should be retried or not if failed.
     @discardableResult
     func startBatchUpload(writeKey: String, batch: URL, completion: @escaping (_ result: Result<Bool, Error>) -> Void) -> (any DataTask)? {
+        if customTrackUrl != nil {
+            sendBatchAsOneRequestPerEvent(batchFileURL: batch, completion: completion)
+            return nil
+        }
         guard let uploadURL = segmentURL(for: apiHost, path: "/b") else {
-            self.analytics?.reportInternalError(HTTPClientErrors.failedToOpenBatch)
+            analytics?.reportInternalError(HTTPClientErrors.failedToOpenBatch)
             completion(.failure(HTTPClientErrors.failedToOpenBatch))
             return nil
         }
@@ -78,6 +83,10 @@ public class HTTPClient {
     ///   - completion: The closure executed when done. Passes if the task should be retried or not if failed.
     @discardableResult
     func startBatchUpload(writeKey: String, data: Data, completion: @escaping (_ result: Result<Bool, Error>) -> Void) -> (any UploadTask)? {
+        if customTrackUrl != nil {
+            sendBatchAsOneRequestPerEvent(batchData: data, completion: completion)
+            return nil
+        }
         guard let uploadURL = segmentURL(for: apiHost, path: "/b") else {
             self.analytics?.reportInternalError(HTTPClientErrors.failedToOpenBatch)
             completion(.failure(HTTPClientErrors.failedToOpenBatch))
@@ -198,5 +207,58 @@ extension HTTPClient {
         }
 
         return request
+    }
+
+    internal func configuredRequestForBatchUpload(for url: URL, method: String) -> URLRequest {
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 60)
+        request.httpMethod = method
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.addValue("analytics-ios/\(Analytics.version())", forHTTPHeaderField: "User-Agent")
+        request.addValue("gzip", forHTTPHeaderField: "Accept-Encoding")
+
+        if let requestFactory = analytics?.configuration.values.requestFactory {
+            request = requestFactory(request)
+        }
+
+        return request
+    }
+
+    internal func logBatchRequest(request: URLRequest, bodyFileURL: URL?, bodyData: Data?) {
+        let curl = buildCurlForLog(request: request, bodyFileURL: bodyFileURL, bodyData: bodyData)
+        NSLog("[Segment] Batch request cURL:\n%@", curl)
+    }
+
+    private func buildCurlForLog(request: URLRequest, bodyFileURL: URL?, bodyData: Data?) -> String {
+        var parts = ["curl"]
+        if let method = request.httpMethod, method != "GET" {
+            parts.append("-X \(method)")
+        }
+        if let url = request.url?.absoluteString {
+            let escaped = url.replacingOccurrences(of: "'", with: "'\\''")
+            parts.append(" '\(escaped)'")
+        }
+        var headers = request.allHTTPHeaderFields ?? [:]
+        if headers["Authorization"] == nil, headers["X-Write-Key"] == nil {
+            headers["Authorization"] = "Basic \(Self.authorizationHeaderForWriteKey(apiKey))"
+        }
+        for (key, value) in headers.sorted(by: { $0.key < $1.key }) {
+            let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
+            parts.append(" -H '\(key): \(escaped)'")
+        }
+        if let fileURL = bodyFileURL {
+            let path = fileURL.path.replacingOccurrences(of: "'", with: "'\\''")
+            parts.append(" --data-binary '@\(path)'")
+        } else if let data = bodyData, let bodyString = String(data: data, encoding: .utf8), bodyString.count < 2048 {
+            let escaped = bodyString.replacingOccurrences(of: "'", with: "'\\''")
+            parts.append(" -d '\(escaped)'")
+        } else if let data = bodyData {
+            let tempDir = FileManager.default.temporaryDirectory
+            let fileName = "segment_batch_\(UUID().uuidString).json"
+            let tempURL = tempDir.appendingPathComponent(fileName)
+            try? data.write(to: tempURL)
+            let path = tempURL.path.replacingOccurrences(of: "'", with: "'\\''")
+            parts.append(" --data-binary '@\(path)'")
+        }
+        return parts.joined(separator: " \\\n  ")
     }
 }
