@@ -314,11 +314,11 @@ extension RawEvent {
         result.timestamp = Date().iso8601()
         result.integrations = try? JSON([String: Any]())
         result._metadata = DestinationMetadata()
-        
-        if let system: System = store.currentState() {
-            result.writeKey = system.configuration.values.writeKey
-        }
-        
+//        
+//        if let system: System = store.currentState() {
+//            result.writeKey = system.configuration.values.writeKey
+//        }
+//        
         return result
     }
 }
