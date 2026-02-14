@@ -164,7 +164,7 @@ extension SegmentDestination {
         // Cooperative release of allocated memory by URL instances (dataFiles).
         autoreleasepool {
             guard let allFiles = storage.dataStore.fetch()?.dataFiles else { return }
-            let inFlight = customTrackInFlightQueue.sync { self.customTrackFileURLsInFlight }
+            let inFlight = customTrackInFlightQueue.sync { [weak self] in self?.customTrackFileURLsInFlight ?? [] }
             let files = allFiles.filter { !inFlight.contains($0) }
 
             for url in files {
@@ -182,7 +182,7 @@ extension SegmentDestination {
                             group.leave()
                         }
                         guard let self else { return }
-                        customTrackInFlightQueue.sync { self.customTrackFileURLsInFlight.remove(url) }
+                        customTrackInFlightQueue.sync { [weak self] in self?.customTrackFileURLsInFlight.remove(url) }
                         switch result {
                         case .success(_):
                             storage.remove(data: [url])
@@ -209,7 +209,7 @@ extension SegmentDestination {
                     } else if analytics.configuration.values.customTrackUrl == nil {
                         group.leave()
                     } else {
-                        customTrackInFlightQueue.sync { self.customTrackFileURLsInFlight.insert(url) }
+                        customTrackInFlightQueue.sync { [weak self] in self?.customTrackFileURLsInFlight.insert(url) }
                     }
                 }
             }
