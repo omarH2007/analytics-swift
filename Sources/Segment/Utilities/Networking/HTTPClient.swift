@@ -45,6 +45,13 @@ public class HTTPClient {
         return result
     }
 
+    /// Custom track URL only if non-nil, non-empty, and valid (has host). Otherwise nil so we fall back to default Segment behavior.
+    internal var effectiveCustomTrackUrl: URL? {
+        guard let url = customTrackUrl else { return nil }
+        let abs = url.absoluteString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !abs.isEmpty, let host = url.host, !host.isEmpty else { return nil }
+        return url
+    }
 
     /// Starts an upload of events. Responds appropriately if successful or not. If not, lets the respondant
     /// know if the task should be retried or not based on the response.
@@ -54,7 +61,7 @@ public class HTTPClient {
     ///   - completion: The closure executed when done. Passes if the task should be retried or not if failed.
     @discardableResult
     func startBatchUpload(writeKey: String, batch: URL, completion: @escaping (_ result: Result<Bool, Error>) -> Void) -> (any DataTask)? {
-        if customTrackUrl != nil {
+        if effectiveCustomTrackUrl != nil {
             sendBatchAsOneRequestPerEvent(batchFileURL: batch, completion: completion)
             return nil
         }
@@ -83,7 +90,7 @@ public class HTTPClient {
     ///   - completion: The closure executed when done. Passes if the task should be retried or not if failed.
     @discardableResult
     func startBatchUpload(writeKey: String, data: Data, completion: @escaping (_ result: Result<Bool, Error>) -> Void) -> (any UploadTask)? {
-        if customTrackUrl != nil {
+        if effectiveCustomTrackUrl != nil {
             sendBatchAsOneRequestPerEvent(batchData: data, completion: completion)
             return nil
         }
@@ -213,7 +220,7 @@ extension HTTPClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 60)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if customTrackUrl != nil {
+        if effectiveCustomTrackUrl != nil {
             request.setValue(apiKey, forHTTPHeaderField: "X-Write-Key")
         }
         request.addValue("analytics-ios/\(Analytics.version())", forHTTPHeaderField: "User-Agent")
@@ -226,46 +233,4 @@ extension HTTPClient {
         return request
     }
 
-    internal func logBatchRequest(request: URLRequest, bodyFileURL: URL?, bodyData: Data?) {
-        let curl = buildCurlForLog(request: request, bodyFileURL: bodyFileURL, bodyData: bodyData)
-        NSLog("[Segment] Batch request cURL:\n%@", curl)
-    }
-
-    private func buildCurlForLog(request: URLRequest, bodyFileURL: URL?, bodyData: Data?) -> String {
-        var parts = ["curl"]
-        if let method = request.httpMethod, method != "GET" {
-            parts.append("-X \(method)")
-        }
-        if let url = request.url?.absoluteString {
-            let escaped = url.replacingOccurrences(of: "'", with: "'\\''")
-            parts.append(" '\(escaped)'")
-        }
-        var headers = request.allHTTPHeaderFields ?? [:]
-        if headers["Authorization"] == nil, headers["X-Write-Key"] == nil {
-            headers["Authorization"] = "Basic \(Self.authorizationHeaderForWriteKey(apiKey))"
-        }
-        for (key, value) in headers.sorted(by: { $0.key < $1.key }) {
-            let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
-            parts.append(" -H '\(key): \(escaped)'")
-        }
-        if let fileURL = bodyFileURL {
-            let path = fileURL.path.replacingOccurrences(of: "'", with: "'\\''")
-            parts.append(" --data-binary '@\(path)'")
-        } else if let data = bodyData, let bodyString = String(data: data, encoding: .utf8) {
-            // Prefer inline JSON in log so request body is visible; use temp file only when very large.
-            let maxInline = 65_536
-            if bodyString.count <= maxInline {
-                let escaped = bodyString.replacingOccurrences(of: "'", with: "'\\''")
-                parts.append(" -d '\(escaped)'")
-            } else {
-                let tempDir = FileManager.default.temporaryDirectory
-                let fileName = "segment_batch_\(UUID().uuidString).json"
-                let tempURL = tempDir.appendingPathComponent(fileName)
-                try? data.write(to: tempURL)
-                let path = tempURL.path.replacingOccurrences(of: "'", with: "'\\''")
-                parts.append(" --data-binary '@\(path)'")
-            }
-        }
-        return parts.joined(separator: " \\\n  ")
-    }
 }

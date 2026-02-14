@@ -21,7 +21,7 @@ extension HTTPClient {
     /// Sends each event in the batch as a separate POST to customTrackUrl (body = single event JSON).
     /// Called only when customTrackUrl is set; does not affect the default Segment path.
     internal func sendBatchAsOneRequestPerEvent(batchFileURL: URL? = nil, batchData: Data? = nil, completion: @escaping (Result<Bool, Error>) -> Void) {
-        guard let uploadURL = customTrackUrl else {
+        guard let uploadURL = effectiveCustomTrackUrl else {
             completion(.failure(HTTPClientErrors.failedToOpenBatch))
             return
         }
@@ -63,7 +63,6 @@ extension HTTPClient {
                 group.enter()
 
                 let request = configuredRequestForBatchUpload(for: uploadURL, method: "POST")
-                logBatchRequest(request: request, bodyFileURL: nil, bodyData: eventBody)
 
                 let task = session.uploadTask(with: request, from: eventBody) { [weak self] (_, response, error) in
                     defer {

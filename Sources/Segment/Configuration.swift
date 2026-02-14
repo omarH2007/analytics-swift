@@ -368,7 +368,12 @@ extension Configuration {
     /// - Parameter url: Full URL (e.g. `URL(string: "https://your-server.com/ingest")!`).
     @discardableResult
     public func customTrackUrl(_ url: URL) -> Configuration {
-        values.customTrackUrl = url
+        let abs = url.absoluteString.trimmingCharacters(in: .whitespacesAndNewlines)
+        if abs.isEmpty || url.host == nil || (url.host?.isEmpty ?? true) {
+            values.customTrackUrl = nil
+        } else {
+            values.customTrackUrl = url
+        }
         return self
     }
 
@@ -376,9 +381,12 @@ extension Configuration {
     /// - Parameter urlString: Full URL string (e.g. `"https://your-server.com/ingest"`).
     @discardableResult
     public func customTrackUrl(string urlString: String) -> Configuration {
-        if let url = URL(string: urlString) {
-            values.customTrackUrl = url
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let url = URL(string: trimmed), url.host != nil, !(url.host?.isEmpty ?? true) else {
+            values.customTrackUrl = nil
+            return self
         }
+        values.customTrackUrl = url
         return self
     }
 }
