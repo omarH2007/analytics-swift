@@ -200,7 +200,7 @@ extension SegmentDestination {
                     
                     if let upload = uploadTask {
                         add(uploadTask: UploadTaskInfo(url: url, data: nil, task: upload))
-                    } else if analytics?.configuration.values.customTrackUrl == nil {
+                    } else if analytics.configuration.values.customTrackUrl == nil {
                         group.leave()
                     }
                 }
@@ -269,7 +269,7 @@ extension SegmentDestination {
             
             if let upload = uploadTask {
                 add(uploadTask: UploadTaskInfo(url: nil, data: data, task: upload))
-            } else if analytics?.configuration.values.customTrackUrl == nil {
+            } else if analytics.configuration.values.customTrackUrl == nil {
                 group.leave()
                 semaphore.signal()
             }
