@@ -50,6 +50,9 @@ public class SegmentDestination: DestinationPlugin, Subscriber, FlushCompletion 
     internal var httpClient: HTTPClient?
     private var uploads = [UploadTaskInfo]()
     private let uploadsQueue = DispatchQueue(label: "uploadsQueue.segment.com")
+    /// File URLs currently being sent via customTrackUrl (one POST per event). Prevents duplicate send when a later flush runs before completion.
+    private var customTrackFileURLsInFlight = Set<URL>()
+    private let customTrackInFlightQueue = DispatchQueue(label: "com.segment.customTrackInFlight")
     private var storage: Storage?
 
     @Atomic internal var eventCount: Int = 0
@@ -160,8 +163,10 @@ extension SegmentDestination {
 
         // Cooperative release of allocated memory by URL instances (dataFiles).
         autoreleasepool {
-            guard let files = storage.dataStore.fetch()?.dataFiles else { return }
-            
+            guard let allFiles = storage.dataStore.fetch()?.dataFiles else { return }
+            let inFlight = customTrackInFlightQueue.sync { customTrackFileURLsInFlight }
+            let files = allFiles.filter { !inFlight.contains($0) }
+
             for url in files {
                 // Use the autorelease pool to ensure that unnecessary memory allocations
                 // are released after each iteration. If there is a large backlog of files
@@ -177,6 +182,7 @@ extension SegmentDestination {
                             group.leave()
                         }
                         guard let self else { return }
+                        customTrackInFlightQueue.sync { customTrackFileURLsInFlight.remove(url) }
                         switch result {
                         case .success(_):
                             storage.remove(data: [url])
@@ -202,6 +208,8 @@ extension SegmentDestination {
                         add(uploadTask: UploadTaskInfo(url: url, data: nil, task: upload))
                     } else if analytics.configuration.values.customTrackUrl == nil {
                         group.leave()
+                    } else {
+                        customTrackInFlightQueue.sync { customTrackFileURLsInFlight.insert(url) }
                     }
                 }
             }
