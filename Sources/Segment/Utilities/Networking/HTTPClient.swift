@@ -59,7 +59,7 @@ public class HTTPClient {
             return nil
         }
         guard let uploadURL = segmentURL(for: apiHost, path: "/b") else {
-            analytics?.reportInternalError(HTTPClientErrors.failedToOpenBatch)
+            self.analytics?.reportInternalError(HTTPClientErrors.failedToOpenBatch)
             completion(.failure(HTTPClientErrors.failedToOpenBatch))
             return nil
         }
@@ -248,16 +248,20 @@ extension HTTPClient {
         if let fileURL = bodyFileURL {
             let path = fileURL.path.replacingOccurrences(of: "'", with: "'\\''")
             parts.append(" --data-binary '@\(path)'")
-        } else if let data = bodyData, let bodyString = String(data: data, encoding: .utf8), bodyString.count < 2048 {
-            let escaped = bodyString.replacingOccurrences(of: "'", with: "'\\''")
-            parts.append(" -d '\(escaped)'")
-        } else if let data = bodyData {
-            let tempDir = FileManager.default.temporaryDirectory
-            let fileName = "segment_batch_\(UUID().uuidString).json"
-            let tempURL = tempDir.appendingPathComponent(fileName)
-            try? data.write(to: tempURL)
-            let path = tempURL.path.replacingOccurrences(of: "'", with: "'\\''")
-            parts.append(" --data-binary '@\(path)'")
+        } else if let data = bodyData, let bodyString = String(data: data, encoding: .utf8) {
+            // Prefer inline JSON in log so request body is visible; use temp file only when very large.
+            let maxInline = 65_536
+            if bodyString.count <= maxInline {
+                let escaped = bodyString.replacingOccurrences(of: "'", with: "'\\''")
+                parts.append(" -d '\(escaped)'")
+            } else {
+                let tempDir = FileManager.default.temporaryDirectory
+                let fileName = "segment_batch_\(UUID().uuidString).json"
+                let tempURL = tempDir.appendingPathComponent(fileName)
+                try? data.write(to: tempURL)
+                let path = tempURL.path.replacingOccurrences(of: "'", with: "'\\''")
+                parts.append(" --data-binary '@\(path)'")
+            }
         }
         return parts.joined(separator: " \\\n  ")
     }
