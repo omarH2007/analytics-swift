@@ -25,8 +25,9 @@ public class HTTPClient {
     private var apiHost: String
     private var apiKey: String
     private var cdnHost: String
+    internal var customTrackUrl: URL?
 
-    private weak var analytics: Analytics?
+    internal weak var analytics: Analytics?
 
     init(analytics: Analytics) {
         self.analytics = analytics
@@ -34,7 +35,7 @@ public class HTTPClient {
         self.apiKey = analytics.configuration.values.writeKey
         self.apiHost = analytics.configuration.values.apiHost
         self.cdnHost = analytics.configuration.values.cdnHost
-        
+        self.customTrackUrl = analytics.configuration.values.customTrackUrl
         self.session = analytics.configuration.values.httpSession()
     }
 
@@ -44,6 +45,13 @@ public class HTTPClient {
         return result
     }
 
+    /// Custom track URL only if non-nil, non-empty, and valid (has host). Otherwise nil so we fall back to default Segment behavior.
+    internal var effectiveCustomTrackUrl: URL? {
+        guard let url = customTrackUrl else { return nil }
+        let abs = url.absoluteString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !abs.isEmpty, let host = url.host, !host.isEmpty else { return nil }
+        return url
+    }
 
     /// Starts an upload of events. Responds appropriately if successful or not. If not, lets the respondant
     /// know if the task should be retried or not based on the response.
@@ -53,6 +61,10 @@ public class HTTPClient {
     ///   - completion: The closure executed when done. Passes if the task should be retried or not if failed.
     @discardableResult
     func startBatchUpload(writeKey: String, batch: URL, completion: @escaping (_ result: Result<Bool, Error>) -> Void) -> (any DataTask)? {
+        if effectiveCustomTrackUrl != nil {
+            sendBatchAsOneRequestPerEvent(batchFileURL: batch, completion: completion)
+            return nil
+        }
         guard let uploadURL = segmentURL(for: apiHost, path: "/b") else {
             self.analytics?.reportInternalError(HTTPClientErrors.failedToOpenBatch)
             completion(.failure(HTTPClientErrors.failedToOpenBatch))
@@ -78,6 +90,10 @@ public class HTTPClient {
     ///   - completion: The closure executed when done. Passes if the task should be retried or not if failed.
     @discardableResult
     func startBatchUpload(writeKey: String, data: Data, completion: @escaping (_ result: Result<Bool, Error>) -> Void) -> (any UploadTask)? {
+        if effectiveCustomTrackUrl != nil {
+            sendBatchAsOneRequestPerEvent(batchData: data, completion: completion)
+            return nil
+        }
         guard let uploadURL = segmentURL(for: apiHost, path: "/b") else {
             self.analytics?.reportInternalError(HTTPClientErrors.failedToOpenBatch)
             completion(.failure(HTTPClientErrors.failedToOpenBatch))
@@ -199,4 +215,22 @@ extension HTTPClient {
 
         return request
     }
+
+    internal func configuredRequestForBatchUpload(for url: URL, method: String) -> URLRequest {
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 60)
+        request.httpMethod = method
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if effectiveCustomTrackUrl != nil {
+            request.setValue(apiKey, forHTTPHeaderField: "X-Write-Key")
+        }
+        request.addValue("analytics-ios/\(Analytics.version())", forHTTPHeaderField: "User-Agent")
+        request.addValue("gzip", forHTTPHeaderField: "Accept-Encoding")
+
+        if let requestFactory = analytics?.configuration.values.requestFactory {
+            request = requestFactory(request)
+        }
+
+        return request
+    }
+
 }

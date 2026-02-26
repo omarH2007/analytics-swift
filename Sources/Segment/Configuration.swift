@@ -127,6 +127,8 @@ public class Configuration {
         var storageMode: StorageMode = .disk
         var anonymousIdGenerator: AnonymousIdGenerator = SegmentAnonymousId()
         var httpSession: (() -> any HTTPSession) = HTTPSessions.urlSession
+        /// When set, used only for sending event batches. All other requests (e.g. settings) use default Segment hosts.
+        var customTrackUrl: URL? = nil
     }
 
     internal var values: Values
@@ -359,6 +361,32 @@ extension Configuration {
         -> Configuration
     {
         values.httpSession = httpSession
+        return self
+    }
+
+    /// Use this URL only for sending event batches. Settings and all other requests keep using Segment’s default hosts.
+    /// - Parameter url: Full URL (e.g. `URL(string: "https://your-server.com/ingest")!`).
+    @discardableResult
+    public func customTrackUrl(_ url: URL) -> Configuration {
+        let abs = url.absoluteString.trimmingCharacters(in: .whitespacesAndNewlines)
+        if abs.isEmpty || url.host == nil || (url.host?.isEmpty ?? true) {
+            values.customTrackUrl = nil
+        } else {
+            values.customTrackUrl = url
+        }
+        return self
+    }
+
+    /// Use this URL only for sending event batches. Settings and all other requests keep using Segment’s default hosts.
+    /// - Parameter urlString: Full URL string (e.g. `"https://your-server.com/ingest"`).
+    @discardableResult
+    public func customTrackUrl(string urlString: String) -> Configuration {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let url = URL(string: trimmed), url.host != nil, !(url.host?.isEmpty ?? true) else {
+            values.customTrackUrl = nil
+            return self
+        }
+        values.customTrackUrl = url
         return self
     }
 }
