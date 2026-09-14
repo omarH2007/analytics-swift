@@ -294,7 +294,7 @@ class FailedNetworkCalls: URLProtocol {
     }
 }
 
-// Records every data upload (request + body) for customTrackUrl tests.
+// Records every POST sent with a body (request + body) for customTrackUrl tests.
 class RecordingHTTPSession: HTTPSession {
     struct RecordedUpload {
         let request: URLRequest
@@ -324,6 +324,9 @@ class RecordingHTTPSession: HTTPSession {
     }
 
     func dataTask(with request: URLRequest, completionHandler: @escaping @Sendable (Data?, URLResponse?, (any Error)?) -> Void) -> URLSessionDataTask {
+        if request.httpMethod == "POST" {
+            Self.recordedDataUploads.append(RecordedUpload(request: request, body: request.httpBody))
+        }
         return session.dataTask(with: request, completionHandler: completionHandler)
     }
 
@@ -391,6 +394,9 @@ class DelayingHTTPSession: HTTPSession {
         return session.uploadTask(with: request, from: bodyData ?? Data(), completionHandler: completionHandler)
     }
     func dataTask(with request: URLRequest, completionHandler: @escaping @Sendable (Data?, URLResponse?, (any Error)?) -> Void) -> URLSessionDataTask {
+        if request.httpMethod == "POST" {
+            Self.dataUploadCount += 1
+        }
         return session.dataTask(with: request, completionHandler: completionHandler)
     }
     func finishTasksAndInvalidate() {
@@ -437,6 +443,8 @@ class ScriptedHTTPSession: HTTPSession {
 
     private static let lock = NSLock()
     private static var bodies = [Data]()
+    private static var uploadTasks = 0
+    private static var postRequests = [URLRequest]()
     static var outcome: Outcome = .status(200)
     static var responseDelay: TimeInterval = 0.01
 
@@ -446,23 +454,51 @@ class ScriptedHTTPSession: HTTPSession {
         return bodies
     }
 
+    /// Calls to either uploadTask method (file or data).
+    static var uploadTaskCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return uploadTasks
+    }
+
+    /// POST requests sent as data tasks.
+    static var postDataTaskRequests: [URLRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return postRequests
+    }
+
     static func reset() {
         lock.lock()
         bodies = []
+        uploadTasks = 0
+        postRequests = []
         lock.unlock()
         outcome = .status(200)
         responseDelay = 0.01
     }
 
     func uploadTask(with request: URLRequest, fromFile file: URL, completionHandler: @escaping @Sendable (Data?, URLResponse?, (any Error)?) -> Void) -> ScriptedTask {
+        Self.lock.lock()
+        Self.uploadTasks += 1
+        Self.lock.unlock()
         return respond(to: request, body: try? Data(contentsOf: file), completionHandler: completionHandler)
     }
 
     func uploadTask(with request: URLRequest, from bodyData: Data?, completionHandler: @escaping @Sendable (Data?, URLResponse?, (any Error)?) -> Void) -> ScriptedTask {
+        Self.lock.lock()
+        Self.uploadTasks += 1
+        Self.lock.unlock()
         return respond(to: request, body: bodyData, completionHandler: completionHandler)
     }
 
     func dataTask(with request: URLRequest, completionHandler: @escaping @Sendable (Data?, URLResponse?, (any Error)?) -> Void) -> ScriptedTask {
+        if request.httpMethod == "POST" {
+            Self.lock.lock()
+            Self.postRequests.append(request)
+            Self.lock.unlock()
+            return respond(to: request, body: request.httpBody, completionHandler: completionHandler)
+        }
         // settings: not found, so the SDK keeps its default settings.
         let url = request.url!
         return ScriptedTask { completionHandler(nil, HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil), nil) }

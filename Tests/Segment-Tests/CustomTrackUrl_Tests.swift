@@ -70,6 +70,43 @@ final class CustomTrackUrl_Tests: XCTestCase {
         }
     }
 
+    // MARK: - Plain JSON POST, never an upload
+
+    func testCustomTrackUrl_sendsPlainJSONPostsAndNeverUploads() throws {
+        let writeKey = "customTrackNeverUploads"
+        UserDefaults.standard.set(true, forKey: "com.segment.customTrackUrl.legacyBacklogPurged.\(writeKey)")
+        // production defaults: disk storage (batches are files on disk), asynchronous mode.
+        let analytics = Analytics(
+            configuration: Configuration(writeKey: writeKey)
+                .customTrackUrl(string: customTrackURLString)
+                .flushAt(9999)
+                .flushInterval(9999)
+                .httpSession(ScriptedHTTPSession())
+        )
+        waitUntilStarted(analytics: analytics)
+        analytics.storage.hardReset(doYouKnowHowToUseThis: true)
+
+        for i in 0..<3 {
+            analytics.track(name: "Plain \(i)", properties: ["i": i])
+        }
+        let flushDone = XCTestExpectation(description: "flush done")
+        analytics.flush { flushDone.fulfill() }
+        wait(for: [flushDone], timeout: 10)
+
+        XCTAssertEqual(ScriptedHTTPSession.uploadTaskCount, 0, "customTrackUrl must never use an upload task (file or data)")
+        let requests = ScriptedHTTPSession.postDataTaskRequests
+        XCTAssertEqual(requests.count, 3, "One plain POST per event")
+        for request in requests {
+            XCTAssertEqual(request.url?.absoluteString, customTrackURLString)
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+            let body = try XCTUnwrap(request.httpBody)
+            let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+            XCTAssertNil(json["batch"], "Body is a single event, not a batch file")
+            XCTAssertEqual(json["type"] as? String, "track")
+        }
+    }
+
     // MARK: - X-Write-Key header
 
     func testCustomTrackUrl_setsXWriteKeyHeader() throws {

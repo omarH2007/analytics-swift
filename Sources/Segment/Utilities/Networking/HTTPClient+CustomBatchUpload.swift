@@ -5,6 +5,9 @@
 //  Extension: when Configuration.customTrackUrl is set, events are sent as one POST per event
 //  to that URL (body = single event JSON). All logic lives here so the main HTTPClient stays minimal for upstream sync.
 //
+//  Requests are plain data tasks, never upload tasks: no file is ever uploaded, and URLSession doesn't add its
+//  resumable-upload behaviour (Upload-Draft-Interop-Version / Upload-Complete headers, automatic resume).
+//
 
 import Foundation
 #if os(Linux) || os(Windows)
@@ -68,9 +71,10 @@ extension HTTPClient {
                 concurrency.wait()
                 group.enter()
 
-                let request = configuredRequestForBatchUpload(for: uploadURL, method: "POST")
+                var request = configuredRequestForBatchUpload(for: uploadURL, method: "POST")
+                request.httpBody = eventBody
 
-                let task = session.uploadTask(with: request, from: eventBody) { [weak self] (_, response, error) in
+                let task = session.dataTask(with: request) { [weak self] (_, response, error) in
                     defer {
                         concurrency.signal()
                         group.leave()
