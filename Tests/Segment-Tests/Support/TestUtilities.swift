@@ -398,4 +398,94 @@ class DelayingHTTPSession: HTTPSession {
     }
 }
 
+// Answers every request with a scripted outcome without touching the network, and records every upload body.
+class ScriptedHTTPSession: HTTPSession {
+    enum Outcome {
+        case status(Int)
+        case offline
+    }
+
+    final class ScriptedTask: UploadTask {
+        private let lock = NSLock()
+        private var currentState: URLSessionTask.State = .suspended
+        private let finish: () -> Void
+
+        init(finish: @escaping () -> Void) {
+            self.finish = finish
+        }
+
+        var state: URLSessionTask.State {
+            lock.lock()
+            defer { lock.unlock() }
+            return currentState
+        }
+
+        func resume() {
+            setState(.running)
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + ScriptedHTTPSession.responseDelay) {
+                self.setState(.completed)
+                self.finish()
+            }
+        }
+
+        private func setState(_ state: URLSessionTask.State) {
+            lock.lock()
+            currentState = state
+            lock.unlock()
+        }
+    }
+
+    private static let lock = NSLock()
+    private static var bodies = [Data]()
+    static var outcome: Outcome = .status(200)
+    static var responseDelay: TimeInterval = 0.01
+
+    static var uploadedBodies: [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        return bodies
+    }
+
+    static func reset() {
+        lock.lock()
+        bodies = []
+        lock.unlock()
+        outcome = .status(200)
+        responseDelay = 0.01
+    }
+
+    func uploadTask(with request: URLRequest, fromFile file: URL, completionHandler: @escaping @Sendable (Data?, URLResponse?, (any Error)?) -> Void) -> ScriptedTask {
+        return respond(to: request, body: try? Data(contentsOf: file), completionHandler: completionHandler)
+    }
+
+    func uploadTask(with request: URLRequest, from bodyData: Data?, completionHandler: @escaping @Sendable (Data?, URLResponse?, (any Error)?) -> Void) -> ScriptedTask {
+        return respond(to: request, body: bodyData, completionHandler: completionHandler)
+    }
+
+    func dataTask(with request: URLRequest, completionHandler: @escaping @Sendable (Data?, URLResponse?, (any Error)?) -> Void) -> ScriptedTask {
+        // settings: not found, so the SDK keeps its default settings.
+        let url = request.url!
+        return ScriptedTask { completionHandler(nil, HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil), nil) }
+    }
+
+    func finishTasksAndInvalidate() {}
+
+    private func respond(to request: URLRequest, body: Data?, completionHandler: @escaping @Sendable (Data?, URLResponse?, (any Error)?) -> Void) -> ScriptedTask {
+        Self.lock.lock()
+        Self.bodies.append(body ?? Data())
+        Self.lock.unlock()
+
+        let url = request.url!
+        let outcome = Self.outcome
+        return ScriptedTask {
+            switch outcome {
+            case .status(let code):
+                completionHandler(nil, HTTPURLResponse(url: url, statusCode: code, httpVersion: nil, headerFields: nil), nil)
+            case .offline:
+                completionHandler(nil, nil, URLError(.notConnectedToInternet))
+            }
+        }
+    }
+}
+
 #endif

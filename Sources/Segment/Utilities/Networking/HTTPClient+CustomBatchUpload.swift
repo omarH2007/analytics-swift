@@ -14,6 +14,8 @@ import FoundationNetworking
 private enum CustomBatchUploadConstants {
     static let maxConcurrentEventUploads = 20
     static let queue = DispatchQueue(label: "com.segment.analytics.batchSend", qos: .utility)
+    /// Off the main queue: a flush blocking its thread (synchronous mode, in-memory storage) waits on these completions.
+    static let completionQueue = DispatchQueue.global(qos: .utility)
 }
 
 extension HTTPClient {
@@ -42,12 +44,16 @@ extension HTTPClient {
         }
 
         CustomBatchUploadConstants.queue.async { [weak self] in
-            guard let self else { return }
+            // always complete, or the flush waiting on this batch never finishes.
+            guard let self else {
+                CustomBatchUploadConstants.completionQueue.async { completion(.failure(HTTPClientErrors.badSession)) }
+                return
+            }
 
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let events = json["batch"] as? [[String: Any]],
                   !events.isEmpty else {
-                DispatchQueue.main.async { completion(.success(true)) }
+                CustomBatchUploadConstants.completionQueue.async { completion(.success(true)) }
                 return
             }
 
@@ -86,7 +92,7 @@ extension HTTPClient {
                 task.resume()
             }
 
-            group.notify(queue: .main) { [weak self] in
+            group.notify(queue: CustomBatchUploadConstants.completionQueue) { [weak self] in
                 if let err = firstError {
                     self?.analytics?.reportInternalError(err)
                     completion(.failure(err))

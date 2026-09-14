@@ -50,9 +50,11 @@ public class SegmentDestination: DestinationPlugin, Subscriber, FlushCompletion 
     internal var httpClient: HTTPClient?
     private var uploads = [UploadTaskInfo]()
     private let uploadsQueue = DispatchQueue(label: "uploadsQueue.segment.com")
-    /// File URLs currently being sent via customTrackUrl (one POST per event). Prevents duplicate send when a later flush runs before completion.
-    private var customTrackFileURLsInFlight = Set<URL>()
-    private let customTrackInFlightQueue = DispatchQueue(label: "com.segment.customTrackInFlight")
+    /// customTrackUrl only: batches being taken out of storage, shared by every instance. See `takeCustomTrackBatch(url:)`.
+    private static var customTrackClaimedFiles = Set<URL>()
+    private static let customTrackClaimQueue = DispatchQueue(label: "com.segment.customTrackClaim")
+    /// customTrackUrl only: batch files found on disk at launch that the one-time legacy purge still has to delete.
+    private var customTrackLegacyFiles = Set<URL>()
     private var storage: Storage?
 
     @Atomic internal var eventCount: Int = 0
@@ -61,6 +63,7 @@ public class SegmentDestination: DestinationPlugin, Subscriber, FlushCompletion 
         guard let analytics = self.analytics else { return }
         storage = analytics.storage
         httpClient = HTTPClient(analytics: analytics)
+        snapshotLegacyCustomTrackBacklog()
 
         // Add DestinationMetadata enrichment plugin
         add(plugin: DestinationMetadataPlugin())
@@ -161,12 +164,15 @@ extension SegmentDestination {
         guard let analytics = self.analytics else { return }
         guard let httpClient = self.httpClient else { return }
 
+        if httpClient.effectiveCustomTrackUrl != nil {
+            flushFilesToCustomTrackUrl(group: group)
+            return
+        }
+
         // Cooperative release of allocated memory by URL instances (dataFiles).
         autoreleasepool {
-            guard let allFiles = storage.dataStore.fetch()?.dataFiles else { return }
-            let inFlight = customTrackInFlightQueue.sync { [weak self] in self?.customTrackFileURLsInFlight ?? [] }
-            let files = allFiles.filter { !inFlight.contains($0) }
-
+            guard let files = storage.dataStore.fetch()?.dataFiles else { return }
+            
             for url in files {
                 // Use the autorelease pool to ensure that unnecessary memory allocations
                 // are released after each iteration. If there is a large backlog of files
@@ -182,7 +188,6 @@ extension SegmentDestination {
                             group.leave()
                         }
                         guard let self else { return }
-                        customTrackInFlightQueue.sync { [weak self] in self?.customTrackFileURLsInFlight.remove(url) }
                         switch result {
                         case .success(_):
                             storage.remove(data: [url])
@@ -206,24 +211,29 @@ extension SegmentDestination {
                         cleanupUploads()
                     }
                     
+                    // we have a legit upload in progress now, so add it to our list.
                     if let upload = uploadTask {
                         add(uploadTask: UploadTaskInfo(url: url, data: nil, task: upload))
-                    } else if analytics.configuration.values.customTrackUrl == nil {
-                        group.leave()
                     } else {
-                        customTrackInFlightQueue.sync { [weak self] in self?.customTrackFileURLsInFlight.insert(url) }
+                        // we couldn't get a task, so we need to leave the group or things will hang.
+                        group.leave()
                     }
                 }
             }
         }
     }
-
+    
     private func flushData(group: DispatchGroup) {
         // DO NOT CALL THIS FROM THE MAIN THREAD, IT BLOCKS!
         // Don't make me add a check here; i'll be sad you didn't follow directions.
         guard let storage = self.storage else { return }
         guard let analytics = self.analytics else { return }
         guard let httpClient = self.httpClient else { return }
+        
+        if httpClient.effectiveCustomTrackUrl != nil {
+            flushDataToCustomTrackUrl(group: group)
+            return
+        }
         
         let totalCount = storage.dataStore.count
         var currentCount = 0
@@ -279,14 +289,153 @@ extension SegmentDestination {
                 cleanupUploads()
             }
             
+            // we have a legit upload in progress now, so add it to our list.
             if let upload = uploadTask {
                 add(uploadTask: UploadTaskInfo(url: nil, data: data, task: upload))
-            } else if analytics.configuration.values.customTrackUrl == nil {
+            } else {
+                // we couldn't get a task, so we need to leave the group or things will hang.
                 group.leave()
                 semaphore.signal()
             }
-
+            
             _ = semaphore.wait(timeout: .distantFuture)
+        }
+    }
+}
+
+// MARK: - customTrackUrl delivery (at most once, never retried)
+
+/*
+ When customTrackUrl is set, every event is attempted at most once and is never retried.
+
+ Batches are taken out of storage *before* any request is made. Whatever happens next (2xx, 4xx, 5xx,
+ timeout, offline, app suspended or killed mid-upload) a batch can never be fetched again, so a failing
+ endpoint can't make later flushes, interval timers or app launches re-send the same events.
+ */
+extension SegmentDestination {
+    /// customTrackUrl, disk storage.
+    private func flushFilesToCustomTrackUrl(group: DispatchGroup) {
+        guard let analytics = self.analytics else { return }
+        guard let httpClient = self.httpClient else { return }
+        guard let files = storage?.dataStore.fetch()?.dataFiles else { return }
+
+        for url in files {
+            autoreleasepool {
+                guard let batch = takeCustomTrackBatch(url: url) else { return }
+
+                group.enter()
+                analytics.log(message: "Processing Batch:\n\(url.lastPathComponent)")
+                httpClient.startBatchUpload(writeKey: analytics.configuration.values.writeKey, data: batch) { result in
+                    defer { group.leave() }
+                    if case .failure(let error) = result {
+                        analytics.log(message: "Dropped \(url.lastPathComponent), it will not be retried: \(error)")
+                    } else {
+                        analytics.log(message: "Processed: \(url.lastPathComponent)")
+                    }
+                }
+            }
+        }
+        finishLegacyCustomTrackPurgeIfDone()
+    }
+
+    /// customTrackUrl, memory storage.
+    private func flushDataToCustomTrackUrl(group: DispatchGroup) {
+        // DO NOT CALL THIS FROM THE MAIN THREAD, IT BLOCKS!
+        guard let storage = self.storage else { return }
+        guard let analytics = self.analytics else { return }
+        guard let httpClient = self.httpClient else { return }
+
+        // bounded by the starting count, so a store that fails to remove can't loop forever.
+        var remaining = storage.dataStore.count
+        while remaining > 0 {
+            // fetch and remove as one step, so an overlapping flush can't take the same events.
+            let taken: (data: Data, count: Int)? = SegmentDestination.customTrackClaimQueue.sync {
+                guard let eventData = storage.dataStore.fetch(), let data = eventData.data,
+                      let removable = eventData.removable, removable.isEmpty == false else { return nil }
+                storage.remove(data: removable)
+                return (data, removable.count)
+            }
+            guard let taken else { return }
+            remaining -= taken.count
+
+            group.enter()
+            analytics.log(message: "Processing In-Memory Batch (size: \(taken.data.count))")
+            let semaphore = DispatchSemaphore(value: 0)
+            httpClient.startBatchUpload(writeKey: analytics.configuration.values.writeKey, data: taken.data) { result in
+                defer {
+                    group.leave()
+                    semaphore.signal()
+                }
+                if case .failure(let error) = result {
+                    analytics.log(message: "Dropped In-Memory Batch (size: \(taken.data.count)), it will not be retried: \(error)")
+                } else {
+                    analytics.log(message: "Processed In-Memory Batch (size: \(taken.data.count))")
+                }
+            }
+            _ = semaphore.wait(timeout: .distantFuture)
+        }
+    }
+
+    /// Claims a batch file, reads it and deletes it, returning its contents to send. Returns nil, and nothing
+    /// is sent, if another flush already took it, it can't be read yet, it can't be deleted, or it is legacy.
+    private func takeCustomTrackBatch(url: URL) -> Data? {
+        guard let storage = self.storage else { return nil }
+        let (claimed, legacy) = SegmentDestination.customTrackClaimQueue.sync {
+            (SegmentDestination.customTrackClaimedFiles.insert(url).inserted, customTrackLegacyFiles.contains(url))
+        }
+        guard claimed else { return nil }
+        defer { SegmentDestination.customTrackClaimQueue.sync { _ = SegmentDestination.customTrackClaimedFiles.remove(url) } }
+
+        if legacy {
+            storage.remove(data: [url])
+            if FileManager.default.fileExists(atPath: url.path) == false {
+                SegmentDestination.customTrackClaimQueue.sync { _ = customTrackLegacyFiles.remove(url) }
+                analytics?.log(message: "Deleted legacy batch \(url.lastPathComponent) without sending it.")
+            }
+            return nil
+        }
+
+        // unreadable (e.g. protected data not available yet): leave it for a later flush.
+        guard let batch = try? Data(contentsOf: url) else { return nil }
+        storage.remove(data: [url])
+        // a batch still on disk would be fetched and sent again by the next flush.
+        if FileManager.default.fileExists(atPath: url.path) {
+            analytics?.log(message: "Unable to delete \(url.lastPathComponent); it will not be sent.")
+            return nil
+        }
+        return batch
+    }
+
+    private var customTrackLegacyPurgedKey: String? {
+        guard let analytics = self.analytics else { return nil }
+        return "com.segment.customTrackUrl.legacyBacklogPurged.\(analytics.configuration.values.writeKey)"
+    }
+
+    /// Batch files already on disk before this instance stores anything were left by SDK versions that re-sent
+    /// failed customTrackUrl batches on every flush, so they were already attempted and failed. Once per install,
+    /// remember them so they are deleted without being sent instead of uploading that backlog one more time.
+    private func snapshotLegacyCustomTrackBacklog() {
+        guard httpClient?.effectiveCustomTrackUrl != nil, let key = customTrackLegacyPurgedKey else { return }
+        guard UserDefaults.standard.bool(forKey: key) == false else { return }
+        guard let storage = self.storage, storage.dataStore.transactionType == .file else { return }
+
+        let files = storage.dataStore.fetch()?.dataFiles ?? []
+        if files.isEmpty {
+            UserDefaults.standard.set(true, forKey: key)
+        } else {
+            SegmentDestination.customTrackClaimQueue.sync { customTrackLegacyFiles = Set(files) }
+        }
+    }
+
+    /// The purge is only marked done once every legacy file is really gone, so an interrupted purge resumes next launch.
+    private func finishLegacyCustomTrackPurgeIfDone() {
+        guard let key = customTrackLegacyPurgedKey, UserDefaults.standard.bool(forKey: key) == false else { return }
+        let done = SegmentDestination.customTrackClaimQueue.sync { () -> Bool in
+            customTrackLegacyFiles = customTrackLegacyFiles.filter { FileManager.default.fileExists(atPath: $0.path) }
+            return customTrackLegacyFiles.isEmpty
+        }
+        if done {
+            UserDefaults.standard.set(true, forKey: key)
         }
     }
 }
