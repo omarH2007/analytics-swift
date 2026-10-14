@@ -70,6 +70,51 @@ final class CustomTrackUrl_Tests: XCTestCase {
         }
     }
 
+    func testCustomTrackUrl_eachEventHasSentAtAndUserId() throws {
+        let analytics = Analytics(
+            configuration: Configuration(writeKey: customTrackWriteKey)
+                .customTrackUrl(string: customTrackURLString)
+                .storageMode(.memory(100))
+                .operatingMode(.synchronous)
+                .flushAt(10)
+                .flushInterval(9999)
+                .httpSession(RecordingHTTPSession())
+        )
+        waitUntilStarted(analytics: analytics)
+        analytics.storage.hardReset(doYouKnowHowToUseThis: true)
+        analytics.reset()
+
+        analytics.track(name: "Guest Event")
+        analytics.identify(userId: "user-1")
+        analytics.track(name: "User Event")
+
+        let flushDone = XCTestExpectation(description: "flush done")
+        analytics.flush { flushDone.fulfill() }
+        wait(for: [flushDone], timeout: 10)
+
+        let bodies = RecordingHTTPSession.recordedDataUploads.compactMap { upload -> [String: Any]? in
+            guard let body = upload.body else { return nil }
+            return try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+        }
+        XCTAssertEqual(bodies.count, 3, "Should send one POST per event")
+
+        for json in bodies {
+            let sentAt = try XCTUnwrap(json["sentAt"] as? String, "Each event carries the batch sentAt")
+            let sentAtDate = sentAt.iso8601()
+            let hasUserId = json.keys.contains("userId")
+            XCTAssertNotNil(sentAtDate, "sentAt is an ISO 8601 date")
+            XCTAssertTrue(hasUserId, "Each event carries a userId key")
+        }
+
+        let guestBody = bodies.first { $0["event"] as? String == "Guest Event" }
+        let guestEvent = try XCTUnwrap(guestBody)
+        XCTAssertTrue(guestEvent["userId"] is NSNull, "A guest event sends userId as null")
+
+        let userBody = bodies.first { $0["event"] as? String == "User Event" }
+        let userEvent = try XCTUnwrap(userBody)
+        XCTAssertEqual(userEvent["userId"] as? String, "user-1")
+    }
+
     // MARK: - Plain JSON POST, never an upload
 
     func testCustomTrackUrl_sendsPlainJSONPostsAndNeverUploads() throws {

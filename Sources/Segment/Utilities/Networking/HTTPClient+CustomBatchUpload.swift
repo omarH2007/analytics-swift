@@ -60,12 +60,17 @@ extension HTTPClient {
                 return
             }
 
+            let sentAt = json["sentAt"] as? String ?? Date().iso8601()
             let group = DispatchGroup()
             let concurrency = DispatchSemaphore(value: CustomBatchUploadConstants.maxConcurrentEventUploads)
             var firstError: Error?
             let lock = NSLock()
 
-            for event in events {
+            for var event in events {
+                // sentAt lives on the batch and a guest has no userId, the events proxy needs both on each event
+                event["sentAt"] = sentAt
+                if event["userId"] == nil { event["userId"] = NSNull() }
+
                 guard let eventBody = try? JSONSerialization.data(withJSONObject: event) else { continue }
 
                 concurrency.wait()
